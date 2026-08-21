@@ -99,7 +99,7 @@ jobs:
             $components += @{id=$item.id; version=$item.version; asset=$asset; sha256=$hash; size_bytes=$file.Length; description=$item.description}
           }
           @{schema_version=1; release=$env:GITHUB_REF_NAME; components=$components} | ConvertTo-Json -Depth 5 | Set-Content release-work/runtime-manifest.json -Encoding utf8
-          Copy-Item "payload/Kiosoo-Video_1.0.2_x64-setup.exe" release-work/
+          Copy-Item "payload/Kiosoo-Video_1.0.2_x64-setup.exe" "release-work/000-Kiosoo-Video_1.0.2_x64-setup.exe"
           Get-ChildItem release-work -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } | Set-Content release-work/SHA256SUMS.txt -Encoding ascii
 
       - name: Replace existing release for this tag
