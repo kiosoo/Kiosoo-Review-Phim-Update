@@ -15,38 +15,17 @@ jobs:
       - name: Checkout release repository
         uses: actions/checkout@v4
 
-      - name: Checkout application source
-        uses: actions/checkout@v4
-        with:
-          repository: kiosoo/Kiosoo-Video-Review-Phim
-          ref: main
-          path: app
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: app/pnpm-lock.yaml
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Prepare Media Core and bundled FFmpeg
+      - name: Prepare Media Core
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force release-work/core/media, app/runtime/media | Out-Null
+          New-Item -ItemType Directory -Force release-work/core/media | Out-Null
           Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile release-work/ffmpeg.zip
           Expand-Archive release-work/ffmpeg.zip release-work/ffmpeg -Force
           $ffmpeg = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           $ffprobe = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffprobe.exe | Select-Object -First 1
           Copy-Item $ffmpeg.FullName release-work/core/media/ffmpeg.exe
           Copy-Item $ffprobe.FullName release-work/core/media/ffprobe.exe
-          Copy-Item $ffmpeg.FullName app/runtime/media/ffmpeg.exe
-          Copy-Item $ffprobe.FullName app/runtime/media/ffprobe.exe
           @{ id="core"; version="8.0.1" } | ConvertTo-Json | Set-Content release-work/core/component.json -Encoding utf8
 
       - name: Prepare portable Python component bootstraps
@@ -100,13 +79,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           '@ | Set-Content release-work/vision-model/install.ps1 -Encoding utf8
 
-      - name: Build application installer
-        shell: pwsh
-        working-directory: app
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm tauri build --bundles nsis
-
       - name: Package components and manifest
         shell: pwsh
         run: |
@@ -127,7 +99,7 @@ jobs:
             $components += @{id=$item.id; version=$item.version; asset=$asset; sha256=$hash; size_bytes=$file.Length; description=$item.description}
           }
           @{schema_version=1; release=$env:GITHUB_REF_NAME; components=$components} | ConvertTo-Json -Depth 5 | Set-Content release-work/runtime-manifest.json -Encoding utf8
-          Copy-Item "app/target/release/bundle/nsis/*-setup.exe" release-work/
+          Copy-Item "payload/Kiosoo-Video_1.0.2_x64-setup.exe" release-work/
           Get-ChildItem release-work -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } | Set-Content release-work/SHA256SUMS.txt -Encoding ascii
 
       - name: Publish GitHub Release
