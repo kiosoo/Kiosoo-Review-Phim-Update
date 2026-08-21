@@ -1,0 +1,142 @@
+name: Build Kiosoo Video release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout release repository
+        uses: actions/checkout@v4
+
+      - name: Checkout application source
+        uses: actions/checkout@v4
+        with:
+          repository: kiosoo/Kiosoo-Video-Review-Phim
+          ref: main
+          path: app
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare Media Core and bundled FFmpeg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force release-work/core/media, app/runtime/media | Out-Null
+          Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile release-work/ffmpeg.zip
+          Expand-Archive release-work/ffmpeg.zip release-work/ffmpeg -Force
+          $ffmpeg = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $ffprobe = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          Copy-Item $ffmpeg.FullName release-work/core/media/ffmpeg.exe
+          Copy-Item $ffprobe.FullName release-work/core/media/ffprobe.exe
+          Copy-Item $ffmpeg.FullName app/runtime/media/ffmpeg.exe
+          Copy-Item $ffprobe.FullName app/runtime/media/ffprobe.exe
+          @{ id="core"; version="8.0.1" } | ConvertTo-Json | Set-Content release-work/core/component.json -Encoding utf8
+
+      - name: Prepare portable Python component bootstraps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pythonVersion = "3.12.10"
+          Invoke-WebRequest "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip" -OutFile release-work/python.zip
+          Invoke-WebRequest "https://bootstrap.pypa.io/get-pip.py" -OutFile release-work/get-pip.py
+          foreach ($id in @("asr", "tts", "vision")) {
+            $dir = "release-work/$id"
+            New-Item -ItemType Directory -Force "$dir/python" | Out-Null
+            Expand-Archive release-work/python.zip "$dir/python" -Force
+            $pth = Get-ChildItem "$dir/python" -Filter "python*._pth" | Select-Object -First 1
+            (Get-Content $pth.FullName) -replace '#import site','import site' | Set-Content $pth.FullName -Encoding ascii
+            Copy-Item release-work/get-pip.py "$dir/python/get-pip.py"
+            & "$dir/python/python.exe" "$dir/python/get-pip.py" --no-warn-script-location
+          }
+          @{ id="asr"; version="1.2.1" } | ConvertTo-Json | Set-Content release-work/asr/component.json -Encoding utf8
+          @'
+          $ErrorActionPreference = "Stop"
+          & "$PSScriptRoot/python/python.exe" -m pip install --no-cache-dir --disable-pip-version-check faster-whisper==1.2.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          '@ | Set-Content release-work/asr/install.ps1 -Encoding utf8
+
+          @{ id="tts"; version="2026.08.21" } | ConvertTo-Json | Set-Content release-work/tts/component.json -Encoding utf8
+          @'
+          $ErrorActionPreference = "Stop"
+          & "$PSScriptRoot/python/python.exe" -m pip install --no-cache-dir --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu124 edge-tts supertonic==1.2.1 omnivoice==0.1.5 vieneu==3.2.3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          '@ | Set-Content release-work/tts/install.ps1 -Encoding utf8
+
+          @{ id="vision"; version="2026.08.21" } | ConvertTo-Json | Set-Content release-work/vision/component.json -Encoding utf8
+          @'
+          $ErrorActionPreference = "Stop"
+          & "$PSScriptRoot/python/python.exe" -m pip install --no-cache-dir --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu124 torch==2.5.1 transformers pillow accelerate safetensors huggingface-hub
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          '@ | Set-Content release-work/vision/install.ps1 -Encoding utf8
+
+      - name: Prepare Vision model bootstrap
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-work/vision-model | Out-Null
+          @{ id="vision-model"; version="Qwen2.5-VL-3B-Instruct" } | ConvertTo-Json | Set-Content release-work/vision-model/component.json -Encoding utf8
+          @'
+          $ErrorActionPreference = "Stop"
+          $python = Join-Path $env:KIOSOO_RUNTIME_ROOT "vision/python/python.exe"
+          if (-not (Test-Path $python)) { throw "Hãy cài Vision Engine trước Vision Model." }
+          $target = Join-Path $PSScriptRoot "Qwen2.5-VL-3B-Instruct"
+          & $python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-VL-3B-Instruct', local_dir=r'$target')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          '@ | Set-Content release-work/vision-model/install.ps1 -Encoding utf8
+
+      - name: Build application installer
+        shell: pwsh
+        working-directory: app
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm tauri build --bundles nsis
+
+      - name: Package components and manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $items = @(
+            @{id="core"; version="8.0.1"; description="FFmpeg và FFprobe"},
+            @{id="asr"; version="1.2.1"; description="Faster-Whisper ASR"},
+            @{id="tts"; version="2026.08.21"; description="TTS local"},
+            @{id="vision"; version="2026.08.21"; description="Vision runtime"},
+            @{id="vision-model"; version="Qwen2.5-VL-3B-Instruct"; description="Qwen Vision model"}
+          )
+          $components = @()
+          foreach ($item in $items) {
+            $asset = "kiosoo-runtime-$($item.id)-windows-x64.zip"
+            Compress-Archive -Path "release-work/$($item.id)/*" -DestinationPath "release-work/$asset" -CompressionLevel Optimal
+            $file = Get-Item "release-work/$asset"
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $components += @{id=$item.id; version=$item.version; asset=$asset; sha256=$hash; size_bytes=$file.Length; description=$item.description}
+          }
+          @{schema_version=1; release=$env:GITHUB_REF_NAME; components=$components} | ConvertTo-Json -Depth 5 | Set-Content release-work/runtime-manifest.json -Encoding utf8
+          Copy-Item "app/target/release/bundle/nsis/*-setup.exe" release-work/
+          Get-ChildItem release-work -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } | Set-Content release-work/SHA256SUMS.txt -Encoding ascii
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Kiosoo Video ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-work/*-setup.exe
+            release-work/kiosoo-runtime-*.zip
+            release-work/runtime-manifest.json
+            release-work/SHA256SUMS.txt

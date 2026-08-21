@@ -1,0 +1,5 @@
+release-work/
+*.zip
+*.exe
+*.msi
+runtime-manifest.json
