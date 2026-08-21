@@ -20,7 +20,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force release-work/core/media | Out-Null
-          Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile release-work/ffmpeg.zip
+          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Invoke-WebRequest $ffmpegUrl -OutFile release-work/ffmpeg.zip
+              break
+            } catch {
+              if ($attempt -eq 4) { throw }
+              Write-Warning "FFmpeg download failed (attempt $attempt/4). Retrying..."
+              Start-Sleep -Seconds (10 * $attempt)
+            }
+          }
           Expand-Archive release-work/ffmpeg.zip release-work/ffmpeg -Force
           $ffmpeg = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           $ffprobe = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffprobe.exe | Select-Object -First 1
