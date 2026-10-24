@@ -26,9 +26,9 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(payload/*-setup.exe)
-          if [ "${#files[@]}" -ne 1 ]; then
-            echo "Expected exactly one payload/*-setup.exe, found ${#files[@]}" >&2
+          files=(payload/Kiosoo-Video_1.0.6_x64-setup.exe)
+          if [ ! -f "${files[0]}" ]; then
+            echo "Missing payload/Kiosoo-Video_1.0.6_x64-setup.exe" >&2
             exit 1
           fi
           name="000-$(basename "${files[0]}")"
