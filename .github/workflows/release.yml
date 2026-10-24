@@ -1,4 +1,9 @@
-name: Build Kiosoo Video release
+name: Publish Kiosoo Video installer
+
+# Runtime components (runtime-manifest.json + *-runtime-*.zip) are built from
+# the app repository's scripts/package-*-runtime.ps1 and uploaded to the release
+# by the maintainer. This workflow must never delete a release or replace
+# runtime assets; it only attaches the installer from payload/.
 
 on:
   push:
@@ -9,126 +14,36 @@ permissions:
   contents: write
 
 jobs:
-  windows-release:
-    runs-on: windows-latest
+  installer:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout release repository
         uses: actions/checkout@v4
 
-      - name: Prepare Media Core
-        shell: pwsh
+      - name: Select installer
+        id: installer
+        shell: bash
         run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force release-work/core/media | Out-Null
-          $ffmpegUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-          for ($attempt = 1; $attempt -le 4; $attempt++) {
-            try {
-              Invoke-WebRequest $ffmpegUrl -OutFile release-work/ffmpeg.zip
-              break
-            } catch {
-              if ($attempt -eq 4) { throw }
-              Write-Warning "FFmpeg download failed (attempt $attempt/4). Retrying..."
-              Start-Sleep -Seconds (10 * $attempt)
-            }
-          }
-          Expand-Archive release-work/ffmpeg.zip release-work/ffmpeg -Force
-          $ffmpeg = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          $ffprobe = Get-ChildItem release-work/ffmpeg -Recurse -Filter ffprobe.exe | Select-Object -First 1
-          Copy-Item $ffmpeg.FullName release-work/core/media/ffmpeg.exe
-          Copy-Item $ffprobe.FullName release-work/core/media/ffprobe.exe
-          @{ id="core"; version="8.0.1" } | ConvertTo-Json | Set-Content release-work/core/component.json -Encoding utf8
+          set -euo pipefail
+          shopt -s nullglob
+          files=(payload/*-setup.exe)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "Expected exactly one payload/*-setup.exe, found ${#files[@]}" >&2
+            exit 1
+          fi
+          name="000-$(basename "${files[0]}")"
+          mkdir -p release-work
+          cp "${files[0]}" "release-work/$name"
+          echo "path=release-work/$name" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare portable Python component bootstraps
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $pythonVersion = "3.12.10"
-          Invoke-WebRequest "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip" -OutFile release-work/python.zip
-          Invoke-WebRequest "https://bootstrap.pypa.io/get-pip.py" -OutFile release-work/get-pip.py
-          foreach ($id in @("asr", "tts", "vision")) {
-            $dir = "release-work/$id"
-            New-Item -ItemType Directory -Force "$dir/python" | Out-Null
-            Expand-Archive release-work/python.zip "$dir/python" -Force
-            $pth = Get-ChildItem "$dir/python" -Filter "python*._pth" | Select-Object -First 1
-            (Get-Content $pth.FullName) -replace '#import site','import site' | Set-Content $pth.FullName -Encoding ascii
-            Copy-Item release-work/get-pip.py "$dir/python/get-pip.py"
-            & "$dir/python/python.exe" "$dir/python/get-pip.py" --no-warn-script-location
-          }
-          @{ id="asr"; version="1.2.1" } | ConvertTo-Json | Set-Content release-work/asr/component.json -Encoding utf8
-          @'
-          $ErrorActionPreference = "Stop"
-          & "$PSScriptRoot/python/python.exe" -m pip install --no-cache-dir --disable-pip-version-check faster-whisper==1.2.1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          '@ | Set-Content release-work/asr/install.ps1 -Encoding utf8
-
-          @{ id="tts"; version="2026.08.21" } | ConvertTo-Json | Set-Content release-work/tts/component.json -Encoding utf8
-          @'
-          $ErrorActionPreference = "Stop"
-          & "$PSScriptRoot/python/python.exe" -m pip install --no-cache-dir --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu124 edge-tts supertonic==1.2.1 omnivoice==0.1.5 vieneu==3.2.3
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          '@ | Set-Content release-work/tts/install.ps1 -Encoding utf8
-
-          @{ id="vision"; version="2026.08.21" } | ConvertTo-Json | Set-Content release-work/vision/component.json -Encoding utf8
-          @'
-          $ErrorActionPreference = "Stop"
-          & "$PSScriptRoot/python/python.exe" -m pip install --no-cache-dir --disable-pip-version-check --extra-index-url https://download.pytorch.org/whl/cu124 torch==2.5.1 transformers pillow accelerate safetensors huggingface-hub
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          '@ | Set-Content release-work/vision/install.ps1 -Encoding utf8
-
-      - name: Prepare Vision model bootstrap
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force release-work/vision-model | Out-Null
-          @{ id="vision-model"; version="Qwen2.5-VL-3B-Instruct" } | ConvertTo-Json | Set-Content release-work/vision-model/component.json -Encoding utf8
-          @'
-          $ErrorActionPreference = "Stop"
-          $python = Join-Path $env:KIOSOO_RUNTIME_ROOT "vision/python/python.exe"
-          if (-not (Test-Path $python)) { throw "Hãy cài Vision Engine trước Vision Model." }
-          $target = Join-Path $PSScriptRoot "Qwen2.5-VL-3B-Instruct"
-          & $python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-VL-3B-Instruct', local_dir=r'$target')"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          '@ | Set-Content release-work/vision-model/install.ps1 -Encoding utf8
-
-      - name: Package components and manifest
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $items = @(
-            @{id="core"; version="8.0.1"; description="FFmpeg và FFprobe"},
-            @{id="asr"; version="1.2.1"; description="Faster-Whisper ASR"},
-            @{id="tts"; version="2026.08.21"; description="TTS local"},
-            @{id="vision"; version="2026.08.21"; description="Vision runtime"},
-            @{id="vision-model"; version="Qwen2.5-VL-3B-Instruct"; description="Qwen Vision model"}
-          )
-          $components = @()
-          foreach ($item in $items) {
-            $asset = "kiosoo-runtime-$($item.id)-windows-x64.zip"
-            Compress-Archive -Path "release-work/$($item.id)/*" -DestinationPath "release-work/$asset" -CompressionLevel Optimal
-            $file = Get-Item "release-work/$asset"
-            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            $components += @{id=$item.id; version=$item.version; asset=$asset; sha256=$hash; size_bytes=$file.Length; description=$item.description}
-          }
-          @{schema_version=1; release=$env:GITHUB_REF_NAME; components=$components} | ConvertTo-Json -Depth 5 | Set-Content release-work/runtime-manifest.json -Encoding utf8
-          Copy-Item "payload/Kiosoo-Video_1.0.4_x64-setup.exe" "release-work/000-Kiosoo-Video_1.0.4_x64-setup.exe"
-          Get-ChildItem release-work -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name } | Set-Content release-work/SHA256SUMS.txt -Encoding ascii
-
-      - name: Replace existing release for this tag
-        shell: pwsh
+      - name: Attach installer without touching runtime assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete $env:GITHUB_REF_NAME --yes 2>$null; if ($LASTEXITCODE -ne 0) { exit 0 }
-
-      - name: Publish installer first for legacy updater compatibility
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Kiosoo Video ${{ github.ref_name }}
-          generate_release_notes: true
-          files: release-work/*-setup.exe
-
-      - name: Publish runtime components
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release-work/kiosoo-runtime-*.zip
-            release-work/runtime-manifest.json
-            release-work/SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "Kiosoo Video $tag" --generate-notes
+          fi
+          gh release upload "$tag" "${{ steps.installer.outputs.path }}" --clobber
