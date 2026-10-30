@@ -25,18 +25,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          files=(payload/Kiosoo-Video_1.0.6_x64-setup.exe)
-          if [ ! -f "${files[0]}" ]; then
-            echo "Missing payload/Kiosoo-Video_1.0.6_x64-setup.exe" >&2
-            exit 1
+          # Only attach an installer whose version matches the pushed tag. The
+          # installer is normally uploaded with the release itself; a stale
+          # payload must never be attached to a newer release.
+          version="${GITHUB_REF_NAME#v}"
+          file="payload/Kiosoo-Video_${version}_x64-setup.exe"
+          if [ ! -f "$file" ]; then
+            echo "No payload installer for ${version}; nothing to attach."
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          name="000-$(basename "${files[0]}")"
           mkdir -p release-work
-          cp "${files[0]}" "release-work/$name"
-          echo "path=release-work/$name" >> "$GITHUB_OUTPUT"
+          cp "$file" "release-work/000-$(basename "$file")"
+          echo "path=release-work/000-$(basename "$file")" >> "$GITHUB_OUTPUT"
 
       - name: Attach installer without touching runtime assets
+        if: steps.installer.outputs.path != ''
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
